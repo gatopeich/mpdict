@@ -12,9 +12,8 @@ setup(
     url             = "http://github.com/gatopeich/mpdict",
     ext_modules = [
         Extension('mpdict',
-            language = 'c++',
             sources = ['mpdict.cpp'],
-            extra_compile_args = '-std=gnu++1z -Wall -Werror'.split(),
+            extra_compile_args = '-std=gnu++1z -Wall -Werror -mtune=native'.split(),
             libraries = ['stdc++', 'boost_container', 'rt'])
     ]
 )

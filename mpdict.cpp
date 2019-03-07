@@ -2,6 +2,7 @@
 
 #include <Python.h>
 
+#include <algorithm>
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include <boost/interprocess/containers/map.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
@@ -12,6 +13,22 @@
 #include <utility>
 
 using namespace boost::interprocess;
+
+
+namespace
+{
+    PyObject *logging = PyImport_ImportModuleNoBlock("logging");
+    void log(const char* level, const char* message)
+    {
+        PyObject *string = Py_BuildValue("s", message);
+        PyObject_CallMethod(logging, level, "O", string);
+        Py_DECREF(string);
+    }
+    inline void log_debug(const char *message) { log("debug", message); }
+    inline void log_info(const char *message) { log("info", message); }
+    inline void log_warning(const char *message) { log("warning", message); }
+    inline void log_error(const char *message) { log("warnerror", message); }
+}
 
 struct MPDict
 {
@@ -25,10 +42,11 @@ struct MPDict
     managed_shared_memory segment;
     ShmemAllocator alloc_inst;
     MyMap *mymap;
+    static const unsigned PAGE = 4096;
 
-    MPDict(const char *name, const char *space)
+    MPDict(const char *name, size_t datasize, const char *space)
         : map_name(name), space_name(space)
-        , segment(create_only, space, 64 << 10)
+        , segment(create_only, space, PAGE*(2+(datasize/PAGE)))
         , alloc_inst(segment.get_segment_manager())
         , mymap(segment.construct<MyMap>(name)(std::less<KeyType>(), alloc_inst))
     {
@@ -49,11 +67,17 @@ struct MPDict
 
     PyObject* set(const std::string && key, const std::string && value)
     {
-        auto [it, ok] = mymap->insert(KeyValueType(key, value)); // TODO: How is the allocator being used?
-        if (ok)
-            Py_RETURN_FALSE; // Did not replace
-        it->second = value;
-        Py_RETURN_TRUE;
+        try {
+            auto [it, ok] = mymap->insert(KeyValueType(key, value)); // TODO: How is the allocator being used?
+            if (ok)
+                Py_RETURN_FALSE; // Did not replace
+            it->second = value;
+            Py_RETURN_TRUE;
+        } catch (...) {
+            log_error("Out of shared memory...");
+            PyErr_NoMemory();
+            return PyErr_NoMemory();
+        }
     }
 
     PyObject *del(const std::string &key)
@@ -62,12 +86,33 @@ struct MPDict
             Py_RETURN_TRUE;
         Py_RETURN_FALSE;
     }
+
+    // TODO: Return iterator
+    PyObject *keys(size_t max = 999)
+    {
+        int len = std::min(mymap->size(), max);
+        PyObject *keys = PyTuple_New(len);
+        if (keys) {
+            int i = 0;
+            auto it = mymap->begin(), e = mymap->end();
+            while (it != e && i < len)
+            {
+                if (PyTuple_SetItem(keys, i++, PyUnicode_FromString(it->first.c_str()))) {
+                    PyErr_BadInternalCall();
+                    Py_DECREF(keys);
+                    return NULL;
+                }
+                ++it;
+            }
+        }
+        return keys;
+    }
 };
 
 typedef struct
 {
-    PyObject_HEAD
-        MPDict *instance;
+    PyObject_HEAD;
+    MPDict *instance;
 } MPDictObject;
 
 static void
@@ -89,9 +134,10 @@ static int
 MPDict_init(MPDictObject *self, PyObject *args)
 {
     const char *name, *space = "mpdict";
-    if (!PyArg_ParseTuple(args, "s|s", &name, &space))
+    unsigned size;
+    if (!PyArg_ParseTuple(args, "sI|s", &name, &size, &space))
         return -1;
-    self->instance = new MPDict(name, space);
+    self->instance = new MPDict(name, size, space);
     return 0;
 }
 
@@ -150,11 +196,21 @@ MPDict_len(MPDictObject *self)
     return PyLong_FromSize_t(self->instance->mymap->size());
 }
 
+static PyObject *
+MPDict_keys(MPDictObject *self, PyObject *args)
+{
+    size_t max = 999;
+    if (!PyArg_ParseTuple(args, "|I", &max))
+        return NULL;
+    return self->instance->keys(max);
+}
+
 static PyMethodDef MPDict_methods[] = {
     {"get", (PyCFunction)MPDict_get, METH_VARARGS, "Get MPDict[key]"},
     {"set", (PyCFunction)MPDict_set, METH_VARARGS, "Set MPDict[key] = value"},
     {"del", (PyCFunction)MPDict_del, METH_VARARGS, "Delete MPDict[key]"},
     {"len", (PyCFunction)MPDict_len, METH_NOARGS, "len(MPDict)"},
+    {"keys", (PyCFunction)MPDict_keys, METH_VARARGS, "Returns a tuple with 'max' number of keys (default 999)"},
     {NULL} /* Sentinel */
 };
 

@@ -11,7 +11,7 @@ from time import monotonic as clock
 # from ujson import dumps,loads
 
 
-def cmdline_args(impl='dict', processes=3, worksize=1e5):
+def cmdline_args(impl='mpdict', processes=3, worksize=1e5):
     return impl, int(processes), float(worksize)
 
 impl, processes, worksize = cmdline_args(*sys.argv[1:])
@@ -22,13 +22,13 @@ print('Testing %s on %d processes X %g items...' % (impl, processes, worksize))
 def worker(d, id):
     my_mark = (id*10)[:10]
     for i in range(int(worksize/processes)):
-        d.set(id+str(i), my_mark)
+        d[id+str(i)] = my_mark
 
 
 if impl == 'dict':
     d = dict()
 
-elif impl == 'shmt':
+elif impl == 'shmht':
     import shmht
     class ShmhtDict(object):
         """ Just enough to run this test """
@@ -65,7 +65,7 @@ elif impl == 'mpdict':
     import mpdict
     class Workaround(mpdict.MPDict):
         def __init__(self, name):
-            super().__init__(name)
+            super().__init__(name, int(100*worksize))  # 100 bytes per dict item
         def __getitem__(self, key): return self.get(key)
         def __setitem__(self, key, value): return self.set(key,value)
         def __len__(self): return self.len()
