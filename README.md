@@ -7,6 +7,28 @@ A Multi-Process Dict for Python 3
 
 Designed to serve as and in-memory database for Python processes in a multi-worker service, allowing to scale at a lower CPU & memory cost.
 
+## Installation
+
+**$ sudo apt install g++ libboost-container-dev**
+
+<...>
+
+**$ python3 setup.py install --user**
+```
+running install
+running build
+running build_ext
+building 'mpdict' extension
+creating build/temp.linux-x86_64-3.6
+x86_64-linux-gnu-gcc -pthread -DNDEBUG -g -fwrapv -O2 -Wall -g -fstack-protector-strong -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2 -fPIC -I/usr/include/python3.6m -c mpdict.cpp -o build/temp.linux-x86_64-3.6/mpdict.o -std=gnu++1z -Wall -Werror -mtune=native
+creating build/lib.linux-x86_64-3.6
+x86_64-linux-gnu-g++ -pthread -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-Bsymbolic-functions -Wl,-z,relro -g -fstack-protector-strong -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2 build/temp.linux-x86_64-3.6/mpdict.o -lstdc++ -lboost_container -lrt -o build/lib.linux-x86_64-3.6/mpdict.cpython-36m-x86_64-linux-gnu.so
+running install_lib
+copying build/lib.linux-x86_64-3.6/mpdict.cpython-36m-x86_64-linux-gnu.so -> /home/user/.local/lib/python3.6/site-packages
+running install_egg_info
+Writing /home/user/.local/lib/python3.6/site-packages/mpdict-0.1.egg-info
+```
+
 ## Performance Check
 
 (On AMD A8-4500M based laptop at ~2 GHz)
