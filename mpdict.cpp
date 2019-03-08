@@ -30,205 +30,170 @@ namespace
     inline void log_error(const char *message) { log("warnerror", message); }
 }
 
-struct MPDict
+struct MPDictObject : PyObject
 {
     using KeyType = std::string;
     using ValueType = std::string;
     using KeyValueType = std::pair<const KeyType, ValueType>;
     using ShmemAllocator = allocator<KeyValueType, managed_shared_memory::segment_manager>;
-    using MyMap = map<KeyType, ValueType, std::less<KeyType>, ShmemAllocator>;
+    using SharedMap = map<KeyType, ValueType, std::less<KeyType>, ShmemAllocator>;
 
-    const std::string map_name, space_name;
+    const std::string map_name, filename;
     managed_shared_memory segment;
     ShmemAllocator alloc_inst;
-    MyMap *mymap;
+    SharedMap *map_;
     static const unsigned PAGE = 4096;
 
-    MPDict(const char *name, size_t datasize, const char *space)
-        : map_name(name), space_name(space)
-        , segment(create_only, space, PAGE*(2+(datasize/PAGE)))
-        , alloc_inst(segment.get_segment_manager())
-        , mymap(segment.construct<MyMap>(name)(std::less<KeyType>(), alloc_inst))
-    {
+    MPDictObject(const char *name, size_t datasize, const char *filename)
         // Must clear on init, but why?
-        shared_memory_object::remove(space_name.c_str());
-    }
-    ~MPDict() {
-        shared_memory_object::remove(space_name.c_str());
-    }
+        : map_name(name), filename((shared_memory_object::remove(filename),filename))
+        , segment(create_only, filename, PAGE*(2+(datasize/PAGE)))
+        , alloc_inst(segment.get_segment_manager())
+        , map_(segment.construct<SharedMap>(name)(std::less<KeyType>(), alloc_inst))
+    {}
 
-    PyObject* get(const std::string & key)
+    ~MPDictObject() { shared_memory_object::remove(filename.c_str()); }
+
+    PyObject *get(const std::string &key)
     {
-        const auto it = mymap->find(key);
-        if (it != mymap->end())
+        const auto it = map_->find(key);
+        if (it != map_->end())
             return PyUnicode_FromStringAndSize(it->second.c_str(), it->second.size());
         Py_RETURN_NONE;
     }
 
-    PyObject* set(const std::string && key, const std::string && value)
+    bool set(const std::string && key, const std::string && value)
     {
         try {
-            auto [it, ok] = mymap->insert(KeyValueType(key, value)); // TODO: How is the allocator being used?
-            if (ok)
-                Py_RETURN_FALSE; // Did not replace
-            it->second = value;
-            Py_RETURN_TRUE;
+            auto [it, ok] = map_->insert(KeyValueType(key, value)); // TODO: How is the allocator being used?
+            if (!ok)
+                it->second = value; // Have to replace
+            return ok;
         } catch (...) {
             log_error("Out of shared memory...");
-            PyErr_NoMemory();
             return PyErr_NoMemory();
         }
     }
 
-    PyObject *del(const std::string &key)
+    PyObject * del(const std::string &key)
     {
-        if (mymap->erase(key))
+        if (map_->erase(key))
             Py_RETURN_TRUE;
         Py_RETURN_FALSE;
     }
 
     // TODO: Return iterator
-    PyObject *keys(size_t max = 999)
+    PyObject * keys()
     {
-        int len = std::min(mymap->size(), max);
+        unsigned i=0, len = map_->size();
         PyObject *keys = PyTuple_New(len);
-        if (keys) {
-            int i = 0;
-            auto it = mymap->begin(), e = mymap->end();
-            while (it != e && i < len)
-            {
-                if (PyTuple_SetItem(keys, i++, PyUnicode_FromString(it->first.c_str()))) {
-                    PyErr_BadInternalCall();
-                    Py_DECREF(keys);
-                    return NULL;
-                }
-                ++it;
-            }
+        if (!keys)
+            return PyErr_NoMemory();
+        for (auto it = map_->cbegin(); it != map_->cend() && i < len; ++it)
+        {
+            if (!PyTuple_SetItem(keys, i++, PyUnicode_FromString(it->first.c_str())))
+                continue;
+            PyErr_BadInternalCall();
+            Py_DECREF(keys);
+            return NULL;
         }
         return keys;
     }
 };
 
-typedef struct
-{
-    PyObject_HEAD;
-    MPDict *instance;
-} MPDictObject;
-
 static void
 MPDict_dealloc(MPDictObject *self)
 {
-    delete self->instance;
+    self->~MPDictObject();
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 static PyObject *
-MPDict_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+MPDict_new(PyTypeObject *type, PyObject * args, PyObject *kwds)
 {
-    MPDictObject *self = (MPDictObject *)type->tp_alloc(type, 0);
-    self->instance = NULL;
-    return (PyObject *)self;
+    return type->tp_alloc(type, 0);
 }
 
 static int
-MPDict_init(MPDictObject *self, PyObject *args)
+MPDict_init(MPDictObject *self, PyObject * args)
 {
-    const char *name, *space = "mpdict";
+    const char *name, *filename = "mpdict";
     unsigned size;
-    if (!PyArg_ParseTuple(args, "sI|s", &name, &size, &space))
+    if (!PyArg_ParseTuple(args, "sI|s", &name, &size, &filename))
         return -1;
-    self->instance = new MPDict(name, size, space);
+    new (self) MPDictObject(name, size, filename);
     return 0;
 }
 
-static PyObject *
-MPDict_get(MPDictObject *self, PyObject *args)
+namespace
 {
-    const char *key;
-    if (!PyArg_ParseTuple(args, "s", &key))
-        return NULL;
-    return self->instance->get(key);
+    // PyMappingMethods
+
+    Py_ssize_t MPDict_lenfunc(MPDictObject *self)
+    {
+        return self->map_->size();
+    }
+
+    PyObject * MPDict_binary_get(MPDictObject *self, PyObject *key)
+    {
+        const char *k;
+        Py_ssize_t kl;
+        if (!(k = PyUnicode_AsUTF8AndSize(key, &kl)))
+            return NULL;
+        return self->get(std::string(k, kl));
+    }
+
+    int MPDict_objobj_set(MPDictObject *self, PyObject *key, PyObject *value)
+    {
+        const char *k, *v; // TODO: Read value as bytes-like (Py_buffer)
+        Py_ssize_t kl, vl;
+        if (!(k = PyUnicode_AsUTF8AndSize(key, &kl)))
+            return PyErr_BadArgument();
+        if (!(v = PyUnicode_AsUTF8AndSize(value, &vl)))
+            return PyErr_BadArgument();
+        self->set(std::string(k,kl), std::string(v,vl));
+        return 0;
+    }
+
+    PyMappingMethods MPDict_mapping = {
+        (lenfunc)MPDict_lenfunc,          // lenfunc PyMappingMethods.mp_length
+        (binaryfunc)MPDict_binary_get,    // binaryfunc PyMappingMethods.mp_subscript
+        (objobjargproc)MPDict_objobj_set, // objobjargproc PyMappingMethods.mp_ass_subscript
+    };
+
+
+    // Custom methods
+
+    PyObject * MPDict_del(MPDictObject *self, PyObject *args)
+    {
+        const char *key;
+        if (!PyArg_ParseTuple(args, "s", &key))
+            return NULL;
+        return self->del(key);
+    }
+
+    PyObject * MPDict_keys(MPDictObject *self, PyObject * args)
+    {
+        return self->keys();
+    }
+
+    PyMethodDef MPDict_methods[] = {
+        {"del", (PyCFunction)MPDict_del, METH_VARARGS, "Delete MPDict[key]"},
+        {"keys",(PyCFunction)MPDict_keys,METH_VARARGS, "Returns a tuple with 'max' number of keys (default 999)"},
+        {NULL} /* Sentinel */
+    };
+
+    PyTypeObject MPDictType = {
+        PyVarObject_HEAD_INIT(NULL, 0)
+    };
+
+    PyModuleDef mpdict_module = {
+        PyModuleDef_HEAD_INIT,
+        m_name : "mpdict",
+        m_doc : "Multi-Process Dictionary by gatopeich.",
+        m_size : -1,
+    };
 }
-
-static PyObject *
-MPDict_set(MPDictObject *self, PyObject *args)
-{
-    const char *key, *value; // TODO: Read value as bytes-like (Py_buffer)
-    if (!PyArg_ParseTuple(args, "ss", &key, &value))
-        return NULL;
-    return self->instance->set(key, value);
-}
-
-static PyObject *
-MPDict__get(MPDictObject *self, PyObject *key)
-{
-    const char *k;
-    Py_ssize_t kl;
-    if (!(k = PyUnicode_AsUTF8AndSize(key, &kl)))
-        return NULL;
-    return self->instance->get(std::string(k,kl));
-}
-
-static PyObject *
-MPDict__set(MPDictObject *self, PyObject *key, PyObject *value)
-{
-    const char *k, *v; // TODO: Read value as bytes-like (Py_buffer)
-    Py_ssize_t kl, vl;
-    if (!(k = PyUnicode_AsUTF8AndSize(key, &kl)))
-        return NULL;
-    if (!(v = PyUnicode_AsUTF8AndSize(value, &vl)))
-        return NULL;
-    return self->instance->set(std::string(k,kl), std::string(v,vl));
-}
-
-static PyObject *
-MPDict_del(MPDictObject *self, PyObject *args)
-{
-    const char *key;
-    if (!PyArg_ParseTuple(args, "s", &key))
-        return NULL;
-    return self->instance->del(key);
-}
-
-static PyObject *
-MPDict_len(MPDictObject *self)
-{
-    return PyLong_FromSize_t(self->instance->mymap->size());
-}
-
-static PyObject *
-MPDict_keys(MPDictObject *self, PyObject *args)
-{
-    size_t max = 999;
-    if (!PyArg_ParseTuple(args, "|I", &max))
-        return NULL;
-    return self->instance->keys(max);
-}
-
-static PyMethodDef MPDict_methods[] = {
-    {"get", (PyCFunction)MPDict_get, METH_VARARGS, "Get MPDict[key]"},
-    {"set", (PyCFunction)MPDict_set, METH_VARARGS, "Set MPDict[key] = value"},
-    {"del", (PyCFunction)MPDict_del, METH_VARARGS, "Delete MPDict[key]"},
-    {"len", (PyCFunction)MPDict_len, METH_NOARGS, "len(MPDict)"},
-    {"keys", (PyCFunction)MPDict_keys, METH_VARARGS, "Returns a tuple with 'max' number of keys (default 999)"},
-    {NULL} /* Sentinel */
-};
-
-static PyTypeObject MPDictType = {
-    PyVarObject_HEAD_INIT(NULL, 0)};
-
-static PyModuleDef mpdict_module = {
-    PyModuleDef_HEAD_INIT,
-    m_name : "mpdict",
-    m_doc : "Multi-Process Dictionary by gatopeich.",
-    m_size : -1,
-};
-
-static PyMappingMethods MPDict_mapping = {
-    (lenfunc)MPDict_len,       // lenfunc PyMappingMethods.mp_length
-    (binaryfunc)MPDict__get,    // binaryfunc PyMappingMethods.mp_subscript
-    (objobjargproc)MPDict__set, // objobjargproc PyMappingMethods.mp_ass_subscript
-};
 
 PyMODINIT_FUNC
 PyInit_mpdict(void)

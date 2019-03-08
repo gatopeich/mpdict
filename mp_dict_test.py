@@ -63,13 +63,7 @@ elif impl == 'redis':
 
 elif impl == 'mpdict':
     import mpdict
-    class Workaround(mpdict.MPDict):
-        def __init__(self, name):
-            super().__init__(name, int(100*worksize))  # 100 bytes per dict item
-        def __getitem__(self, key): return self.get(key)
-        def __setitem__(self, key, value): return self.set(key,value)
-        def __len__(self): return self.len()
-    d = Workaround('TestMPDict')
+    d = mpdict.MPDict('TestMPDict', int(100*worksize))  # 100 bytes per dict item
 
 bg_processes = processes-1
 bg_procs = [Process(target=worker, args=(d, id)) for id in 'abcdefghijklnmo'[:bg_processes]]
