@@ -76,4 +76,4 @@ for p in bg_procs:
     p.join()
 elapsed = clock() - t0
 print('Elapsed %g seconds'%elapsed)
-print('d[%d]:' % len(d), *((k,d[k]) for k in islice(d.keys(),9)))
+print('d[%d]:' % len(d), *((k,d[k]) for k in islice(d,9)))

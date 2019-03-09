@@ -17,6 +17,21 @@ using namespace boost::interprocess;
 
 namespace
 {
+    PyModuleDef mpdict_module = {
+        PyModuleDef_HEAD_INIT,
+        m_name : "mpdict",
+        m_doc : "Multi-Process Dictionary by gatopeich.",
+        m_size : -1,
+    };
+
+    PyTypeObject MPDictType = {
+        PyVarObject_HEAD_INIT(NULL, 0)
+    };
+
+    PyTypeObject MPDictItType = {
+        PyVarObject_HEAD_INIT(NULL, 0)
+    };
+
     PyObject *logging = PyImport_ImportModuleNoBlock("logging");
     void log(const char* level, const char* message)
     {
@@ -101,32 +116,30 @@ struct MPDictObject : PyObject
     }
 };
 
-static void
-MPDict_dealloc(MPDictObject *self)
-{
-    self->~MPDictObject();
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static PyObject *
-MPDict_new(PyTypeObject *type, PyObject * args, PyObject *kwds)
-{
-    return type->tp_alloc(type, 0);
-}
-
-static int
-MPDict_init(MPDictObject *self, PyObject * args)
-{
-    const char *name, *filename = "mpdict";
-    unsigned size;
-    if (!PyArg_ParseTuple(args, "sI|s", &name, &size, &filename))
-        return -1;
-    new (self) MPDictObject(name, size, filename);
-    return 0;
-}
-
 namespace
 {
+
+    void MPDict_dealloc(MPDictObject *self)
+    {
+        self->~MPDictObject();
+        Py_TYPE(self)->tp_free(self);
+    }
+
+    PyObject * MPDict_new(PyTypeObject *type, PyObject * args, PyObject *kwds)
+    {
+        return type->tp_alloc(type, 0);
+    }
+
+    int MPDict_init(MPDictObject *self, PyObject * args)
+    {
+        const char *name, *filename = "mpdict";
+        unsigned size;
+        if (!PyArg_ParseTuple(args, "sI|s", &name, &size, &filename))
+            return -1;
+        new (self) MPDictObject(name, size, filename);
+        return 0;
+    }
+
     // PyMappingMethods
 
     Py_ssize_t MPDict_lenfunc(MPDictObject *self)
@@ -183,16 +196,47 @@ namespace
         {NULL} /* Sentinel */
     };
 
-    PyTypeObject MPDictType = {
-        PyVarObject_HEAD_INIT(NULL, 0)
+    struct MPDictItObject : PyObject
+    {
+        MPDictObject *dict;
+        MPDictObject::SharedMap::iterator it;
     };
 
-    PyModuleDef mpdict_module = {
-        PyModuleDef_HEAD_INIT,
-        m_name : "mpdict",
-        m_doc : "Multi-Process Dictionary by gatopeich.",
-        m_size : -1,
-    };
+    PyObject * MPDictIt_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+    {
+        MPDictObject *dict;
+        if (!PyArg_UnpackTuple(args, "MPDict", 1, 1, &dict) || !PyObject_TypeCheck(dict, &MPDictType))
+            return NULL;
+        MPDictItObject* it = (MPDictItObject*)type->tp_alloc(type, 0);
+        if (!it)
+            return PyErr_NoMemory();
+        Py_INCREF(dict);
+        it->dict = dict;
+        it->it = dict->map_->begin();
+        return it;
+    }
+
+    void MPDictIt_dealloc(MPDictItObject *self)
+    {
+        Py_XDECREF(self->dict);
+        Py_TYPE(self)->tp_free(self);
+    }
+
+    PyObject * MPDictIt_next(MPDictItObject *self)
+    {
+        if (!self->dict || self->it == self->dict->map_->end())
+            return NULL;
+        PyObject* key = PyUnicode_FromString(self->it->first.c_str());
+        if (++self->it == self->dict->map_->end()) {
+            Py_XDECREF(self->dict);
+        }
+        return key;
+    }
+
+    PyObject* MPDict_GetIter(PyObject *self)
+    {
+        return MPDictIt_new(&MPDictItType, PyTuple_Pack(1,self), NULL);
+    }
 }
 
 PyMODINIT_FUNC
@@ -200,16 +244,26 @@ PyInit_mpdict(void)
 {
     MPDictType.tp_name = "mpdict.MPDict";
     MPDictType.tp_basicsize = sizeof(MPDictObject);
-    MPDictType.tp_itemsize = 0;
     MPDictType.tp_dealloc = (destructor)MPDict_dealloc;
     MPDictType.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE;
     MPDictType.tp_doc = "MPDict objects";
+    MPDictType.tp_iter = MPDict_GetIter,
     MPDictType.tp_methods = MPDict_methods;
-    MPDictType.tp_members = NULL;
     MPDictType.tp_init = (initproc)MPDict_init;
     MPDictType.tp_new = MPDict_new;
     MPDictType.tp_as_mapping = &MPDict_mapping;
     if (PyType_Ready(&MPDictType) < 0)
+        return NULL;
+
+    MPDictItType.tp_name = "mpdict.MPDictIterator";
+    MPDictItType.tp_basicsize = sizeof(MPDictItObject);
+    MPDictItType.tp_dealloc = (destructor)MPDictIt_dealloc;
+    MPDictItType.tp_flags = Py_TPFLAGS_DEFAULT;
+    MPDictItType.tp_doc = "MPDict iterator";
+    MPDictItType.tp_iter = PyObject_SelfIter,
+    MPDictItType.tp_iternext = (iternextfunc)MPDictIt_next,
+    MPDictItType.tp_new = MPDictIt_new;
+    if (PyType_Ready(&MPDictItType) < 0)
         return NULL;
 
     PyObject *module = PyModule_Create(&mpdict_module);
