@@ -12,24 +12,16 @@
 #include <functional>
 #include <utility>
 
-using namespace boost::interprocess;
 
 
-namespace
+namespace mpdict
 {
+
     PyModuleDef mpdict_module = {
         PyModuleDef_HEAD_INIT,
         m_name : "mpdict",
         m_doc : "Multi-Process Dictionary by gatopeich.",
         m_size : -1,
-    };
-
-    PyTypeObject MPDictType = {
-        PyVarObject_HEAD_INIT(NULL, 0)
-    };
-
-    PyTypeObject MPDictItType = {
-        PyVarObject_HEAD_INIT(NULL, 0)
     };
 
     PyObject *logging = PyImport_ImportModuleNoBlock("logging");
@@ -39,95 +31,91 @@ namespace
         PyObject_CallMethod(logging, level, "O", string);
         Py_DECREF(string);
     }
+
     inline void log_debug(const char *message) { log("debug", message); }
     inline void log_info(const char *message) { log("info", message); }
     inline void log_warning(const char *message) { log("warning", message); }
     inline void log_error(const char *message) { log("warnerror", message); }
-}
 
-struct MPDictObject : PyObject
-{
-    using KeyType = std::string;
-    using ValueType = std::string;
-    using KeyValueType = std::pair<const KeyType, ValueType>;
-    using ShmemAllocator = allocator<KeyValueType, managed_shared_memory::segment_manager>;
-    using SharedMap = map<KeyType, ValueType, std::less<KeyType>, ShmemAllocator>;
-
-    const std::string map_name, filename;
-    managed_shared_memory segment;
-    ShmemAllocator alloc_inst;
-    SharedMap *map_;
-    static const unsigned PAGE = 4096;
-
-    MPDictObject(const char *name, size_t datasize, const char *filename)
-        // Must clear on init, but why?
-        : map_name(name), filename((shared_memory_object::remove(filename),filename))
-        , segment(create_only, filename, PAGE*(2+(datasize/PAGE)))
-        , alloc_inst(segment.get_segment_manager())
-        , map_(segment.construct<SharedMap>(name)(std::less<KeyType>(), alloc_inst))
-    {}
-
-    ~MPDictObject() { shared_memory_object::remove(filename.c_str()); }
-
-    PyObject *get(const std::string &key)
+    struct MPDictType : PyTypeObject { MPDictType(); } mpdict_type;
+    
+    using namespace boost::interprocess;
+    struct MPDictObject : PyObject
     {
-        const auto it = map_->find(key);
-        if (it != map_->end())
-            return PyUnicode_FromStringAndSize(it->second.c_str(), it->second.size());
-        Py_RETURN_NONE;
-    }
+        using KeyType = std::string;
+        using ValueType = std::string;
+        using KeyValueType = std::pair<const KeyType, ValueType>;
+        using ShmemAllocator = allocator<KeyValueType, managed_shared_memory::segment_manager>;
+        using SharedMap = map<KeyType, ValueType, std::less<KeyType>, ShmemAllocator>;
 
-    bool set(const std::string && key, const std::string && value)
-    {
-        try {
-            auto [it, ok] = map_->insert(KeyValueType(key, value)); // TODO: How is the allocator being used?
-            if (!ok)
-                it->second = value; // Have to replace
-            return ok;
-        } catch (...) {
-            log_error("Out of shared memory...");
-            return PyErr_NoMemory();
-        }
-    }
+        const std::string map_name, filename;
+        managed_shared_memory segment;
+        ShmemAllocator alloc_inst;
+        SharedMap *map_;
+        static const unsigned PAGE = 4096;
 
-    PyObject * del(const std::string &key)
-    {
-        if (map_->erase(key))
-            Py_RETURN_TRUE;
-        Py_RETURN_FALSE;
-    }
+        MPDictObject(const char *name, size_t datasize, const char *filename)
+            // Must clear on init, but why?
+            : map_name(name), filename((shared_memory_object::remove(filename),filename))
+            , segment(create_only, filename, PAGE*(2+(datasize/PAGE)))
+            , alloc_inst(segment.get_segment_manager())
+            , map_(segment.construct<SharedMap>(name)(std::less<KeyType>(), alloc_inst))
+        {}
 
-    // TODO: Return iterator
-    PyObject * keys()
-    {
-        unsigned i=0, len = map_->size();
-        PyObject *keys = PyTuple_New(len);
-        if (!keys)
-            return PyErr_NoMemory();
-        for (auto it = map_->cbegin(); it != map_->cend() && i < len; ++it)
+        ~MPDictObject() { shared_memory_object::remove(filename.c_str()); }
+
+        PyObject *get(const std::string &key)
         {
-            if (!PyTuple_SetItem(keys, i++, PyUnicode_FromString(it->first.c_str())))
-                continue;
-            PyErr_BadInternalCall();
-            Py_DECREF(keys);
-            return NULL;
+            const auto it = map_->find(key);
+            if (it != map_->end())
+                return PyUnicode_FromStringAndSize(it->second.c_str(), it->second.size());
+            Py_RETURN_NONE;
         }
-        return keys;
-    }
-};
 
-namespace
-{
+        bool set(const std::string && key, const std::string && value)
+        {
+            try {
+                // TODO: How is the allocator being used?
+                auto [it, ok] = map_->emplace(key, value);
+                if (!ok)
+                    it->second = value; // Have to replace
+                return ok;
+            } catch (...) {
+                log_error("Out of shared memory...");
+                return PyErr_NoMemory();
+            }
+        }
+
+        PyObject * del(const std::string &key)
+        {
+            if (map_->erase(key))
+                Py_RETURN_TRUE;
+            Py_RETURN_FALSE;
+        }
+
+        // TODO: Return iterator
+        PyObject * keys()
+        {
+            unsigned i=0, len = map_->size();
+            PyObject *keys = PyTuple_New(len);
+            if (!keys)
+                return PyErr_NoMemory();
+            for (auto it = map_->cbegin(); it != map_->cend() && i < len; ++it)
+            {
+                if (!PyTuple_SetItem(keys, i++, PyUnicode_FromString(it->first.c_str())))
+                    continue;
+                PyErr_BadInternalCall();
+                Py_DECREF(keys);
+                return NULL;
+            }
+            return keys;
+        }
+    };
 
     void MPDict_dealloc(MPDictObject *self)
     {
         self->~MPDictObject();
         Py_TYPE(self)->tp_free(self);
-    }
-
-    PyObject * MPDict_new(PyTypeObject *type, PyObject * args, PyObject *kwds)
-    {
-        return type->tp_alloc(type, 0);
     }
 
     int MPDict_init(MPDictObject *self, PyObject * args)
@@ -136,7 +124,7 @@ namespace
         unsigned size;
         if (!PyArg_ParseTuple(args, "sI|s", &name, &size, &filename))
             return -1;
-        new (self) MPDictObject(name, size, filename);
+        new (self) MPDictObject(name, size, filename); // Note this SHOULD NOT touch inherited PyObject!
         return 0;
     }
 
@@ -168,14 +156,7 @@ namespace
         return 0;
     }
 
-    PyMappingMethods MPDict_mapping = {
-        (lenfunc)MPDict_lenfunc,          // lenfunc PyMappingMethods.mp_length
-        (binaryfunc)MPDict_binary_get,    // binaryfunc PyMappingMethods.mp_subscript
-        (objobjargproc)MPDict_objobj_set, // objobjargproc PyMappingMethods.mp_ass_subscript
-    };
-
-
-    // Custom methods
+    // Other methods
 
     PyObject * MPDict_del(MPDictObject *self, PyObject *args)
     {
@@ -190,11 +171,8 @@ namespace
         return self->keys();
     }
 
-    PyMethodDef MPDict_methods[] = {
-        {"del", (PyCFunction)MPDict_del, METH_VARARGS, "Delete MPDict[key]"},
-        {"keys",(PyCFunction)MPDict_keys,METH_VARARGS, "Returns a tuple with 'max' number of keys (default 999)"},
-        {NULL} /* Sentinel */
-    };
+    // MPDictIterator class
+    struct MPDictItType : PyTypeObject { MPDictItType(); } mpdictit_type;
 
     struct MPDictItObject : PyObject
     {
@@ -202,18 +180,15 @@ namespace
         MPDictObject::SharedMap::iterator it;
     };
 
-    PyObject * MPDictIt_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+    int MPDictIt_init(MPDictItObject *self, PyObject *args, PyObject *kwargs)
     {
         MPDictObject *dict;
-        if (!PyArg_UnpackTuple(args, "MPDict", 1, 1, &dict) || !PyObject_TypeCheck(dict, &MPDictType))
-            return NULL;
-        MPDictItObject* it = (MPDictItObject*)type->tp_alloc(type, 0);
-        if (!it)
-            return PyErr_NoMemory();
+        if (!PyArg_UnpackTuple(args, __func__, 1, 1, &dict) || !PyObject_TypeCheck(dict, &mpdict_type))
+            return PyErr_BadArgument();
         Py_INCREF(dict);
-        it->dict = dict;
-        it->it = dict->map_->begin();
-        return it;
+        self->dict = dict;
+        self->it = dict->map_->begin();
+        return 0;
     }
 
     void MPDictIt_dealloc(MPDictItObject *self)
@@ -235,42 +210,62 @@ namespace
 
     PyObject* MPDict_GetIter(PyObject *self)
     {
-        return MPDictIt_new(&MPDictItType, PyTuple_Pack(1,self), NULL);
+        PyObject *args = PyTuple_Pack(1, self);
+        auto *it = (MPDictItObject*)PyType_GenericNew(&mpdictit_type, args, NULL);
+        if (MPDictIt_init(it, args, NULL)) {
+            Py_XDECREF(it);
+            it = NULL;
+        }
+        Py_XDECREF(args);
+        return it;
+    }
+
+    MPDictType::MPDictType() : PyTypeObject{PyVarObject_HEAD_INIT(NULL, 0)}
+    {
+        tp_doc = "MPDict objects";
+        tp_name = "mpdict.MPDict";
+        tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE;
+        tp_basicsize = sizeof(MPDictObject);
+        tp_new = PyType_GenericNew;
+        tp_init = (initproc)MPDict_init;
+        tp_dealloc = (destructor)MPDict_dealloc;
+        tp_iter = (getiterfunc)MPDict_GetIter;
+        tp_as_mapping = new PyMappingMethods {
+            (lenfunc)MPDict_lenfunc,
+            (binaryfunc)MPDict_binary_get,
+            (objobjargproc)MPDict_objobj_set};
+        tp_methods = new PyMethodDef[3] {
+            {"del", (PyCFunction)MPDict_del, METH_VARARGS, "Delete MPDict[key]"},
+            {"keys", (PyCFunction)MPDict_keys, METH_VARARGS, "Returns a tuple with 'max' number of keys (default 999)"},
+            {NULL}};
+    }
+
+    MPDictItType::MPDictItType() : PyTypeObject{PyVarObject_HEAD_INIT(NULL, 0)}
+    {
+        tp_doc = "MPDict iterator";
+        tp_name = "mpdict.MPDictIterator";
+        tp_flags = Py_TPFLAGS_DEFAULT;
+        tp_basicsize = sizeof(MPDictItObject);
+        tp_init = (initproc)MPDictIt_init;
+        tp_dealloc = (destructor)MPDictIt_dealloc;
+        tp_iter = PyObject_SelfIter;
+        tp_iternext = (iternextfunc)MPDictIt_next;
     }
 }
 
 PyMODINIT_FUNC
 PyInit_mpdict(void)
 {
-    MPDictType.tp_name = "mpdict.MPDict";
-    MPDictType.tp_basicsize = sizeof(MPDictObject);
-    MPDictType.tp_dealloc = (destructor)MPDict_dealloc;
-    MPDictType.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE;
-    MPDictType.tp_doc = "MPDict objects";
-    MPDictType.tp_iter = MPDict_GetIter,
-    MPDictType.tp_methods = MPDict_methods;
-    MPDictType.tp_init = (initproc)MPDict_init;
-    MPDictType.tp_new = MPDict_new;
-    MPDictType.tp_as_mapping = &MPDict_mapping;
-    if (PyType_Ready(&MPDictType) < 0)
-        return NULL;
+    using namespace mpdict;
 
-    MPDictItType.tp_name = "mpdict.MPDictIterator";
-    MPDictItType.tp_basicsize = sizeof(MPDictItObject);
-    MPDictItType.tp_dealloc = (destructor)MPDictIt_dealloc;
-    MPDictItType.tp_flags = Py_TPFLAGS_DEFAULT;
-    MPDictItType.tp_doc = "MPDict iterator";
-    MPDictItType.tp_iter = PyObject_SelfIter,
-    MPDictItType.tp_iternext = (iternextfunc)MPDictIt_next,
-    MPDictItType.tp_new = MPDictIt_new;
-    if (PyType_Ready(&MPDictItType) < 0)
+    if (PyType_Ready(&mpdict_type) < 0 || PyType_Ready(&mpdictit_type))
         return NULL;
 
     PyObject *module = PyModule_Create(&mpdict_module);
     if (module)
     {
-        Py_INCREF(&MPDictType);
-        PyModule_AddObject(module, "MPDict", (PyObject *)&MPDictType);
+        Py_INCREF(&mpdict_type);
+        PyModule_AddObject(module, "MPDict", (PyObject *)&mpdict_type);
     }
     return module;
 }
